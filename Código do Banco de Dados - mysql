@@ -1,0 +1,162 @@
+CREATE DATABASE sistema_solicitacoes_urbanas;
+
+USE sistema_solicitacoes_urbanas;
+
+CREATE TABLE estados (
+    id_estado INT AUTO_INCREMENT PRIMARY KEY,
+    nome VARCHAR(100) NOT NULL,
+    sigla CHAR(2) NOT NULL
+);
+
+
+CREATE TABLE cidades (
+    id_cidade INT AUTO_INCREMENT PRIMARY KEY,
+    nome VARCHAR(100) NOT NULL,
+    id_estado INT NOT NULL,
+    FOREIGN KEY (id_estado) REFERENCES estados(id_estado)
+);
+
+CREATE TABLE bairros (
+    id_bairro INT AUTO_INCREMENT PRIMARY KEY,
+    nome VARCHAR(100) NOT NULL,
+    id_cidade INT NOT NULL,
+    FOREIGN KEY (id_cidade) REFERENCES cidades(id_cidade)
+);
+
+CREATE TABLE usuarios (
+    id_usuario INT AUTO_INCREMENT PRIMARY KEY,
+    cpf CHAR(11) UNIQUE NOT NULL,
+    nome VARCHAR(150) NOT NULL,
+    senha VARCHAR(255) NOT NULL,
+    data_cadastro DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+
+CREATE TABLE enderecos (
+    id_endereco INT AUTO_INCREMENT PRIMARY KEY,
+    id_usuario INT NOT NULL,
+    id_bairro INT NOT NULL,
+    rua VARCHAR(150),
+    numero VARCHAR(10),
+    complemento VARCHAR(50),
+    FOREIGN KEY (id_usuario) REFERENCES usuarios(id_usuario),
+    FOREIGN KEY (id_bairro) REFERENCES bairros(id_bairro)
+);
+
+
+CREATE TABLE tecnicos (
+    id_tecnico INT AUTO_INCREMENT PRIMARY KEY,
+    codigo_login VARCHAR(20) UNIQUE NOT NULL,
+    nome VARCHAR(150),
+    senha VARCHAR(255) NOT NULL,
+    especialidade VARCHAR(100)
+);
+
+CREATE TABLE servicos_tipo (
+    id_tipo INT AUTO_INCREMENT PRIMARY KEY,
+    nome VARCHAR(100) NOT NULL,
+    descricao TEXT
+);
+
+
+INSERT INTO servicos_tipo (nome, descricao) VALUES
+("Buraco na Rua", "Abertura ou manutenção de vias"),
+("Troca de Lâmpada", "Iluminação pública"),
+("Poda de Árvore", "Limpeza e manutenção de árvores"),
+("Limpeza de Bueiro", "Desobstrução de ruas"),
+("Sinalização", "Instalação ou manutenção de placas");
+
+CREATE TABLE solicitacoes (
+    id_solicitacao INT AUTO_INCREMENT PRIMARY KEY,
+    id_usuario INT NOT NULL,
+    id_tipo INT NOT NULL,
+    id_tecnico INT NULL,
+    endereco VARCHAR(255) NOT NULL,
+    descricao TEXT,
+    status ENUM("Aberto","Em Andamento","Concluído") DEFAULT "Aberto",
+    data_abertura DATETIME DEFAULT CURRENT_TIMESTAMP,
+    data_conclusao DATETIME NULL,
+    FOREIGN KEY (id_usuario) REFERENCES usuarios(id_usuario),
+    FOREIGN KEY (id_tipo) REFERENCES servicos_tipo(id_tipo),
+    FOREIGN KEY (id_tecnico) REFERENCES tecnicos(id_tecnico)
+);
+
+CREATE TABLE solicitacao_fotos (
+    id_foto INT AUTO_INCREMENT PRIMARY KEY,
+    id_solicitacao INT NOT NULL,
+    foto LONGBLOB NOT NULL,
+    nome_arquivo VARCHAR(255),
+    FOREIGN KEY (id_solicitacao) REFERENCES solicitacoes(id_solicitacao)
+);
+
+CREATE TABLE solicitacao_historico_status (
+    id_historico INT AUTO_INCREMENT PRIMARY KEY,
+    id_solicitacao INT,
+    status_antigo VARCHAR(50),
+    status_novo VARCHAR(50),
+    data_alteracao DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (id_solicitacao) REFERENCES solicitacoes(id_solicitacao)
+);
+
+CREATE TABLE logs_acesso (
+    id_log INT AUTO_INCREMENT PRIMARY KEY,
+    id_usuario INT NULL,
+    id_tecnico INT NULL,
+    data_login DATETIME DEFAULT CURRENT_TIMESTAMP,
+    ip VARCHAR(50),
+    FOREIGN KEY (id_usuario) REFERENCES usuarios(id_usuario),
+    FOREIGN KEY (id_tecnico) REFERENCES tecnicos(id_tecnico)
+);
+
+CREATE TABLE avaliacoes (
+    id_avaliacao INT AUTO_INCREMENT PRIMARY KEY,
+    id_solicitacao INT NOT NULL,
+    nota INT CHECK(nota BETWEEN 1 AND 5),
+    comentario TEXT,
+    FOREIGN KEY (id_solicitacao) REFERENCES solicitacoes(id_solicitacao)
+);
+
+-- VIEW
+-- Mostra solicitações com nome do usuário + tipo + técnico
+CREATE VIEW vw_solicitacoes_detalhes AS
+SELECT 
+    s.id_solicitacao,
+    u.nome AS nome_usuario,
+    t.nome AS nome_tecnico,
+    st.nome AS tipo_servico,
+    s.status,
+    s.data_abertura
+FROM solicitacoes s
+JOIN usuarios u ON s.id_usuario = u.id_usuario
+JOIN servicos_tipo st ON s.id_tipo = st.id_tipo
+LEFT JOIN tecnicos t ON s.id_tecnico = t.id_tecnico;
+
+
+-- PROCEDURE
+-- Marca uma solicitação como concluída
+
+DELIMITER //
+CREATE PROCEDURE concluir_solicitacao(IN sol_id INT)
+BEGIN
+    UPDATE solicitacoes
+    SET status = 'Concluído',
+        data_conclusao = NOW()
+    WHERE id_solicitacao = sol_id;
+END //
+DELIMITER ;
+
+-- TRIGGER
+-- Registra alteração de status automaticamente
+
+DELIMITER //
+CREATE TRIGGER tr_status_change
+AFTER UPDATE ON solicitacoes
+FOR EACH ROW
+BEGIN
+    IF OLD.status <> NEW.status THEN
+        INSERT INTO solicitacao_historico_status
+        (id_solicitacao, status_antigo, status_novo)
+        VALUES (OLD.id_solicitacao, OLD.status, NEW.status);
+    END IF;
+END //
+DELIMITER ;
