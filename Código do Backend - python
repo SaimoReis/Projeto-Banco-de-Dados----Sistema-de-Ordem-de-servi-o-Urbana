@@ -1,0 +1,908 @@
+import os
+import io
+import traceback
+import mysql.connector
+from mysql.connector import Error
+from datetime import datetime
+import tkinter as tk
+from tkinter import ttk, messagebox, filedialog, simpledialog
+from PIL import Image, ImageTk  
+
+
+# CONFIGURAÇÃO DO BANCO
+
+DB_CONFIG = {
+    "host": "localhost",
+    "user": "root",        
+    "password": "SNr36948922@",        
+    "database": "sistema_solicitacoes_urbanas"
+}
+
+# pasta temporária para imagens
+TMP_IMG_DIR = os.path.join(os.getcwd(), "tmp_imgs")
+os.makedirs(TMP_IMG_DIR, exist_ok=True)
+
+
+# UTIL: conexão e wrappers
+
+def get_conn():
+    try:
+        conn = mysql.connector.connect(**DB_CONFIG)
+        return conn
+    except Exception as e:
+        messagebox.showerror("Erro BD", f"Não foi possível conectar ao banco:\n{e}")
+        raise
+
+def fetchall(query, params=()):
+    conn = get_conn()
+    cur = conn.cursor(dictionary=True)
+    cur.execute(query, params)
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+    return rows
+
+def fetchone(query, params=()):
+    conn = get_conn()
+    cur = conn.cursor(dictionary=True)
+    cur.execute(query, params)
+    row = cur.fetchone()
+    cur.close()
+    conn.close()
+    return row
+
+def execute(query, params=(), commit=True):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(query, params)
+    if commit:
+        conn.commit()
+    lastid = cur.lastrowid
+    cur.close()
+    conn.close()
+    return lastid
+
+def call_proc(name, args):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.callproc(name, args)
+    conn.commit()
+    cur.close()
+    conn.close()
+
+
+
+def seed_database_if_needed():
+    try:
+        c = fetchone("SELECT COUNT(*) AS c FROM tecnicos")
+        if c and c['c'] >= 6:
+            
+            return
+    except Exception:
+    
+        pass
+
+    try:
+        
+        if fetchone("SELECT COUNT(*) AS c FROM estados")['c'] == 0:
+            estados = [("Distrito Federal","DF"),("Goiás","GO"),("Minas Gerais","MG"),("Bahia","BA"),("São Paulo","SP")]
+            for n,sig in estados:
+                execute("INSERT INTO estados (nome, sigla) VALUES (%s,%s)", (n,sig))
+        # cidades
+        if fetchone("SELECT COUNT(*) AS c FROM cidades")['c'] == 0:
+            estados_rows = fetchall("SELECT id_estado FROM estados ORDER BY id_estado LIMIT 5")
+            cidades = ["Brasília","Goiânia","Belo Horizonte","Salvador","São Paulo"]
+            for idx, row in enumerate(estados_rows):
+                execute("INSERT INTO cidades (nome, id_estado) VALUES (%s,%s)", (cidades[idx], row['id_estado']))
+        # bairros: 
+        if fetchone("SELECT COUNT(*) AS c FROM bairros")['c'] == 0:
+            cidades_rows = fetchall("SELECT id_cidade FROM cidades ORDER BY id_cidade LIMIT 5")
+            bairros = ["Centro","Setor Leste","Jardim Central","Bairro Novo","Vila Maria"]
+            for idx, row in enumerate(cidades_rows):
+                execute("INSERT INTO bairros (nome, id_cidade) VALUES (%s,%s)", (bairros[idx], row['id_cidade']))
+        # servicos_tipo:
+        if fetchone("SELECT COUNT(*) AS c FROM servicos_tipo")['c'] == 0:
+            serviços = [
+                ("Iluminação Pública","Troca e manutenção de lâmpadas"),
+                ("Pavimentação","Reparo de buracos e recapeamento"),
+                ("Limpeza Urbana","Remoção de entulho e limpeza de áreas"),
+                ("Poda de Árvore","Poda e remoção segura de árvores"),
+                ("Desentupimento de Bueiro","Limpeza e desobstrução de bueiros"),
+                ("Sinalização","Instalação/manutenção de placas e semáforos")
+            ]
+            for nome, desc in serviços:
+                execute("INSERT INTO servicos_tipo (nome, descricao) VALUES (%s,%s)", (nome, desc))
+        # Técnicos: 6
+        if fetchone("SELECT COUNT(*) AS c FROM tecnicos")['c'] == 0:
+            techs = [
+                ("TEC001","João Silva","1234","Iluminação Pública"),
+                ("TEC002","Maria Souza","1234","Pavimentação"),
+                ("TEC003","Carlos Lima","1234","Limpeza Urbana"),
+                ("TEC004","Ana Ribeiro","1234","Poda de Árvore"),
+                ("TEC005","Paulo Mendes","1234","Desentupimento de Bueiro"),
+                ("TEC006","Fernanda Costa","1234","Sinalização")
+            ]
+            for codigo, nome, senha, esp in techs:
+                execute("INSERT INTO tecnicos (codigo_login, nome, senha, especialidade) VALUES (%s,%s,%s,%s)",
+                        (codigo, nome, senha, esp))
+    except Exception as e:
+        print("Erro no seed:", e)
+        traceback.print_exc()
+
+
+# (CRUD)
+
+# Estados / Cidades / Bairros
+def listar_estados():
+    return fetchall("SELECT id_estado, nome, sigla FROM estados ORDER BY nome")
+
+def listar_cidades_por_estado(id_estado):
+    return fetchall("SELECT id_cidade, nome FROM cidades WHERE id_estado=%s ORDER BY nome", (id_estado,))
+
+def listar_bairros_por_cidade(id_cidade):
+    return fetchall("SELECT id_bairro, nome FROM bairros WHERE id_cidade=%s ORDER BY nome", (id_cidade,))
+
+# Usuarios e enderecos
+def buscar_usuario_por_cpf(cpf):
+    return fetchone("SELECT id_usuario, cpf, nome, senha FROM usuarios WHERE cpf=%s", (cpf,))
+
+def inserir_usuario(cpf, nome, senha):
+    return execute("INSERT INTO usuarios (cpf, nome, senha) VALUES (%s,%s,%s)", (cpf, nome, senha))
+
+def inserir_endereco(id_usuario, id_bairro, rua, numero, complemento):
+    return execute("INSERT INTO enderecos (id_usuario, id_bairro, rua, numero, complemento) VALUES (%s,%s,%s,%s,%s)",
+                   (id_usuario, id_bairro, rua, numero, complemento))
+
+# Tecnicos
+def buscar_tecnico_por_codigo(codigo):
+    return fetchone("SELECT id_tecnico, codigo_login, nome, senha, especialidade FROM tecnicos WHERE codigo_login=%s", (codigo,))
+
+# Servicos tipo
+def listar_servicos_tipo():
+    return fetchall("SELECT id_tipo, nome, descricao FROM servicos_tipo ORDER BY id_tipo")
+
+def buscar_servico_por_id(id_tipo):
+    return fetchone("SELECT id_tipo, nome, descricao FROM servicos_tipo WHERE id_tipo=%s", (id_tipo,))
+
+# Solicitacoes + fotos + atribuição automática por especialidade
+def inserir_solicitacao(id_usuario, id_tipo, endereco, descricao):
+    # cria solicitacao
+    sid = execute("""INSERT INTO solicitacoes (id_usuario, id_tipo, endereco, descricao, status, data_abertura)
+                         VALUES (%s,%s,%s,%s,'Aberto',NOW())""", (id_usuario, id_tipo, endereco, descricao))
+    # tentar atribuir automaticamente se houver a solicitacao para o tecnico na area:
+    try:
+        serv = buscar_servico_por_id(id_tipo)
+        if serv:
+            nome_serv = serv['nome'].strip().lower()
+            # buscar técnico cuja especialidade contenha o nome do serviço
+            rows = fetchall("SELECT id_tecnico, especialidade FROM tecnicos")
+            chosen = None
+            for r in rows:
+                esp = (r['especialidade'] or "").strip().lower()
+                
+                if esp == nome_serv or (nome_serv in esp) or (esp in nome_serv):
+                    chosen = r['id_tecnico']
+                    break
+            if chosen:
+                # atualiza a solicitacao com id_tecnico e status Em Andamento
+                execute("UPDATE solicitacoes SET id_tecnico=%s, status='Em Andamento' WHERE id_solicitacao=%s",
+                        (chosen, sid))
+    except Exception as e:
+        print("Erro ao tentar atribuir automaticamente:", e)
+    return sid
+
+def inserir_foto_solicitacao(id_solicitacao, bytes_img, nome_arquivo):
+    return execute("INSERT INTO solicitacao_fotos (id_solicitacao, foto, nome_arquivo) VALUES (%s,%s,%s)",
+                   (id_solicitacao, bytes_img, nome_arquivo))
+
+def listar_solicitacoes_por_usuario(id_usuario):
+    return fetchall("""SELECT s.id_solicitacao AS id, s.id_tipo AS tipo, s.endereco, s.descricao, s.status,
+                              s.data_abertura, s.data_conclusao, s.id_tecnico
+                       FROM solicitacoes s WHERE s.id_usuario=%s ORDER BY s.data_abertura DESC""", (id_usuario,))
+
+def listar_solicitacoes_nao_atribuidas():
+    return fetchall("""SELECT s.id_solicitacao AS id, s.id_tipo AS tipo, s.endereco, s.descricao, s.status, s.data_abertura, s.id_usuario
+                       FROM solicitacoes s WHERE s.id_tecnico IS NULL ORDER BY s.data_abertura ASC""")
+
+def listar_solicitacoes_por_tecnico(id_tecnico):
+    return fetchall("""SELECT s.id_solicitacao AS id, s.id_tipo AS tipo, s.endereco, s.descricao, s.status, s.data_abertura, s.id_usuario
+                       FROM solicitacoes s WHERE s.id_tecnico=%s ORDER BY s.data_abertura DESC""", (id_tecnico,))
+
+def buscar_fotos_solicitacao(id_solicitacao):
+    # retorna lista de tuplas (id_foto, foto(bytes), nome_arquivo)
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT id_foto, foto, nome_arquivo FROM solicitacao_fotos WHERE id_solicitacao=%s", (id_solicitacao,))
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+    return rows
+
+def atribuir_solicitacao(id_solicitacao, id_tecnico):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("UPDATE solicitacoes SET id_tecnico=%s, status='Em Andamento' WHERE id_solicitacao=%s AND id_tecnico IS NULL",
+                (id_tecnico, id_solicitacao))
+    affected = cur.rowcount
+    conn.commit()
+    cur.close()
+    conn.close()
+    return affected > 0
+
+def atualizar_status_solicitacao(id_solicitacao, novo_status):
+    conn = get_conn()
+    cur = conn.cursor()
+    if novo_status == "Concluído":
+        # procedure que define data_conclusao
+        cur.callproc('concluir_solicitacao', [id_solicitacao])
+        conn.commit()
+    else:
+        cur.execute("UPDATE solicitacoes SET status=%s WHERE id_solicitacao=%s", (novo_status, id_solicitacao))
+        conn.commit()
+    cur.close()
+    conn.close()
+    return True
+
+# atualizar e excluir OS (para cidadão)
+def atualizar_solicitacao_db(id_solicitacao, id_tipo, endereco, descricao):
+    """Atualiza campos básicos da solicitação (não altera fotos aqui)."""
+    execute("UPDATE solicitacoes SET id_tipo=%s, endereco=%s, descricao=%s WHERE id_solicitacao=%s",
+            (id_tipo, endereco, descricao, id_solicitacao))
+    return True
+
+def excluir_solicitacao_db(id_solicitacao):
+    """Exclui avaliação, fotos e a própria solicitação.
+       Usar somente após checar regras (concluída + avaliada)."""
+    # deletar fotos
+    execute("DELETE FROM solicitacao_fotos WHERE id_solicitacao=%s", (id_solicitacao,))
+    # deletar avaliacoes
+    execute("DELETE FROM avaliacoes WHERE id_solicitacao=%s", (id_solicitacao,))
+    # deletar historico (opcional manter, mas vamos remover para limpeza)
+    execute("DELETE FROM solicitacao_historico_status WHERE id_solicitacao=%s", (id_solicitacao,))
+    # deletar solicitacao
+    execute("DELETE FROM solicitacoes WHERE id_solicitacao=%s", (id_solicitacao,))
+    return True
+
+# Historico e avaliacoes
+def listar_historico_solicitacao(id_solicitacao):
+    return fetchall("""SELECT id_historico, status_antigo, status_novo, data_alteracao
+                       FROM solicitacao_historico_status
+                       WHERE id_solicitacao=%s ORDER BY data_alteracao DESC""", (id_solicitacao,))
+
+def inserir_avaliacao(id_solicitacao, nota, comentario):
+    return execute("INSERT INTO avaliacoes (id_solicitacao, nota, comentario) VALUES (%s,%s,%s)",
+                   (id_solicitacao, nota, comentario))
+
+def existe_avaliacao(id_solicitacao):
+    r = fetchone("SELECT COUNT(*) AS c FROM avaliacoes WHERE id_solicitacao=%s", (id_solicitacao,))
+    return r['c'] > 0
+
+# logs de acesso
+def inserir_log_acesso(id_usuario=None, id_tecnico=None, ip=None):
+    return execute("INSERT INTO logs_acesso (id_usuario, id_tecnico, data_login, ip) VALUES (%s,%s,NOW(),%s)",
+                   (id_usuario, id_tecnico, ip))
+
+
+# Util imagem 
+
+def load_image_for_tk_from_bytes(image_bytes, maxsize=(320,240)):
+    try:
+        im = Image.open(io.BytesIO(image_bytes))
+        im.thumbnail(maxsize)
+        return ImageTk.PhotoImage(im)
+    except Exception as e:
+        # falha no preview
+        return None
+
+def save_bytes_to_tmpfile(bytes_data, filename):
+    safe = filename.replace("/", "_").replace("\\", "_")
+    path = os.path.join(TMP_IMG_DIR, safe)
+    with open(path, "wb") as f:
+        f.write(bytes_data)
+    return path
+
+
+# GUI (ttk moderno) - sem Admin
+
+class SistemaApp:
+    def __init__(self, root):
+        self.root = root
+        root.title("Sistema de Solicitações Urbanas - Completo")
+        root.geometry("1150x750")
+        style = ttk.Style()
+        try:
+            style.theme_use('clam')
+        except:
+            pass
+        style.configure('Card.TFrame', background='#f7f9fc', borderwidth=1, relief='solid')
+        # cache imagens
+        self._img_cache = {}
+
+        # seed DB
+        
+        seed_database_if_needed()
+
+        # telas
+        self.frame_top = ttk.Frame(root, padding=8)
+        self.frame_top.pack(fill='x')
+        self.frame_main = ttk.Frame(root, padding=8)
+        self.frame_main.pack(fill='both', expand=True)
+
+        ttk.Label(self.frame_top, text="Sistema de Solicitações Urbanas (Completo)", font=("Arial", 16)).pack(side='left')
+        ttk.Button(self.frame_top, text="Login Cidadão", command=self.login_cidadao_window).pack(side='right', padx=6)
+        ttk.Button(self.frame_top, text="Login Técnico", command=self.login_tecnico_window).pack(side='right', padx=6)
+        
+
+        self.clear_main_content()
+        ttk.Label(self.frame_main, text="Bem-vindo! Faça login para usar o sistema.", font=("Arial", 13)).pack(pady=24)
+
+    def clear_main_content(self):
+        for w in self.frame_main.winfo_children():
+            w.destroy()
+
+    # ---------- Login Cidadão ----------
+    def login_cidadao_window(self):
+        w = tk.Toplevel(self.root); w.title("Login - Cidadão"); w.geometry("420x320")
+        ttk.Label(w, text="CPF (11 dígitos):").pack(anchor='w', padx=10, pady=(10,0))
+        cpf_e = ttk.Entry(w); cpf_e.pack(fill='x', padx=10)
+        ttk.Label(w, text="Senha:").pack(anchor='w', padx=10, pady=(8,0))
+        senha_e = ttk.Entry(w, show="*"); senha_e.pack(fill='x', padx=10)
+        ttk.Label(w, text="(Caso CPF não exista, será criado após inserir nome)").pack(anchor='w', padx=10, pady=6)
+        msg = ttk.Label(w, text="", foreground="red"); msg.pack(pady=6)
+        def do_login():
+            cpf = cpf_e.get().strip()
+            senha = senha_e.get().strip()
+            if not cpf or not senha:
+                msg.config(text="Preencha CPF e senha")
+                return
+            if not (cpf.isdigit() and len(cpf) == 11):
+                msg.config(text="CPF inválido")
+                return
+            user = buscar_usuario_por_cpf(cpf)
+            if user:
+                if user['senha'] != senha:
+                    msg.config(text="Senha incorreta")
+                    return
+                # login ok
+                inserir_log_acesso(id_usuario=user['id_usuario'], id_tecnico=None, ip="local")
+                w.destroy()
+                self.c_id = user['id_usuario']
+                self.c_nome = user['nome']
+                self.show_cidadao_panel()
+            else:
+                # criar usuário -> nome e endereço
+                if messagebox.askyesno("Criar conta", "CPF não encontrado. Deseja criar conta?"):
+                    nome = simpledialog.askstring("Nome", "Nome completo:", parent=w)
+                    if not nome:
+                        msg.config(text="Nome obrigatório")
+                        return
+                    nid = inserir_usuario(cpf, nome, senha)
+                    # (estado->cidade->bairro)
+                    messagebox.showinfo("Cadastro", "Agora vamos cadastrar seu endereço.")
+                    # chamar função de formulário de endereço que salva em enderecos
+                    self.form_endereco_pos_cadastro(nid)
+                    inserir_log_acesso(id_usuario=nid, id_tecnico=None, ip="local")
+                    w.destroy()
+                    self.c_id = nid
+                    self.c_nome = nome
+                    self.show_cidadao_panel()
+        ttk.Button(w, text="Entrar", command=do_login).pack(pady=8)
+        ttk.Button(w, text="Fechar", command=w.destroy).pack()
+
+    # formulário para cadastrar endereço após criar usuário
+    def form_endereco_pos_cadastro(self, id_usuario):
+        w = tk.Toplevel(self.root); w.title("Endereço - Cadastro"); w.geometry("480x380")
+        ttk.Label(w, text="Endereço do usuário", font=("Arial", 12)).pack(pady=6)
+        frame = ttk.Frame(w); frame.pack(fill='both', expand=True, padx=8)
+        # estado
+        ttk.Label(frame, text="Estado:").grid(row=0, column=0, sticky='w')
+        estados = listar_estados()
+        estado_map = {str(e['id_estado']): e['nome'] for e in estados}
+        estado_keys = list(estado_map.keys())
+        estado_var = tk.StringVar(value=estado_keys[0] if estado_keys else "")
+        cb_estado = ttk.Combobox(frame, values=[f"{k} - {estado_map[k]}" for k in estado_keys], textvariable=estado_var, state='readonly')
+        cb_estado.grid(row=0, column=1, sticky='ew', padx=6)
+        # cidade
+        ttk.Label(frame, text="Cidade:").grid(row=1, column=0, sticky='w')
+        cidade_var = tk.StringVar(value="")
+        cb_cidade = ttk.Combobox(frame, values=[], textvariable=cidade_var, state='readonly')
+        cb_cidade.grid(row=1, column=1, sticky='ew', padx=6)
+        # bairro
+        ttk.Label(frame, text="Bairro:").grid(row=2, column=0, sticky='w')
+        bairro_var = tk.StringVar(value="")
+        cb_bairro = ttk.Combobox(frame, values=[], textvariable=bairro_var, state='readonly')
+        cb_bairro.grid(row=2, column=1, sticky='ew', padx=6)
+        # rua/numero/complemento
+        ttk.Label(frame, text="Rua:").grid(row=3, column=0, sticky='w'); rua_e = ttk.Entry(frame); rua_e.grid(row=3, column=1, sticky='ew', padx=6)
+        ttk.Label(frame, text="Número:").grid(row=4, column=0, sticky='w'); num_e = ttk.Entry(frame); num_e.grid(row=4, column=1, sticky='ew', padx=6)
+        ttk.Label(frame, text="Complemento:").grid(row=5, column=0, sticky='w'); comp_e = ttk.Entry(frame); comp_e.grid(row=5, column=1, sticky='ew', padx=6)
+        frame.columnconfigure(1, weight=1)
+        # carregamento dinâmico cidades/bairros
+        def carregar_cidades(ev=None):
+            sel = estado_var.get()
+            if not sel: return
+            id_est = int(sel.split("-")[0].strip())
+            cidades = listar_cidades_por_estado(id_est)
+            options = [f"{c['id_cidade']} - {c['nome']}" for c in cidades]
+            cb_cidade['values'] = options
+            if options:
+                cb_cidade.current(0)
+                carregar_bairros()
+        def carregar_bairros(ev=None):
+            selc = cb_cidade.get()
+            if not selc: return
+            id_cid = int(selc.split("-")[0].strip())
+            bairros = listar_bairros_por_cidade(id_cid)
+            options = [f"{b['id_bairro']} - {b['nome']}" for b in bairros]
+            cb_bairro['values'] = options
+            if options:
+                cb_bairro.current(0)
+        cb_estado.bind("<<ComboboxSelected>>", carregar_cidades)
+        cb_cidade.bind("<<ComboboxSelected>>", carregar_bairros)
+        # set defaults
+        if estado_keys:
+            cb_estado.current(0)
+            carregar_cidades()
+        def salvar():
+            if not cb_bairro.get():
+                messagebox.showwarning("Dados", "Escolha bairro.")
+                return
+            id_bairro = int(cb_bairro.get().split("-")[0].strip())
+            rua = rua_e.get().strip()
+            numero = num_e.get().strip()
+            comp = comp_e.get().strip()
+            inserir_endereco(id_usuario, id_bairro, rua, numero, comp)
+            messagebox.showinfo("OK", "Endereço salvo.")
+            w.destroy()
+        ttk.Button(w, text="Salvar Endereço", command=salvar).pack(pady=8)
+
+    # ---------- painel cidadão ----------
+    def show_cidadao_panel(self):
+        self.clear_main_content()
+        ttk.Label(self.frame_main, text=f"Área do Cidadão — {self.c_nome} (ID {self.c_id})", font=("Arial", 14)).pack(anchor='w', pady=6)
+        toolbar = ttk.Frame(self.frame_main); toolbar.pack(fill='x')
+        ttk.Button(toolbar, text="Nova Solicitação", command=self.ui_nova_solicitacao).pack(side='left', padx=6)
+        ttk.Button(toolbar, text="Minhas Solicitações", command=self.ui_listar_minhas_solicitacoes).pack(side='left', padx=6)
+        ttk.Button(toolbar, text="Sair", command=self.logout_to_home).pack(side='right', padx=6)
+        self.content_frame = ttk.Frame(self.frame_main); self.content_frame.pack(fill='both', expand=True)
+        self.ui_listar_minhas_solicitacoes()
+
+    def logout_to_home(self):
+        self.clear_main_content()
+        ttk.Label(self.frame_main, text="Faça login para usar o sistema.", font=("Arial", 13)).pack(pady=24)
+
+    def ui_nova_solicitacao(self):
+        for w in self.content_frame.winfo_children(): w.destroy()
+        ttk.Label(self.content_frame, text="Nova Solicitação", font=("Arial", 12)).pack(anchor='w', pady=6)
+        frame = ttk.Frame(self.content_frame); frame.pack(fill='x', padx=6)
+        # tipos de serviço
+        tipos = listar_servicos_tipo()
+        tipo_map = {str(t['id_tipo']): t['nome'] for t in tipos}
+        tipo_vals = [f"{k} - {tipo_map[k]}" for k in tipo_map]
+        tipo_var = tk.StringVar(value=tipo_vals[0] if tipo_vals else "")
+        cb_tipo = ttk.Combobox(frame, values=tipo_vals, textvariable=tipo_var, state='readonly'); cb_tipo.pack(fill='x', pady=4)
+        ttk.Label(frame, text="Endereço onde ocorrerá o serviço:").pack(anchor='w')
+        # (endereços cadastrados em enderecos)
+        end_rows = fetchall("""SELECT e.id_endereco, e.rua, e.numero, e.complemento, b.nome AS bairro, c.nome AS cidade, s.sigla AS estado
+                                FROM enderecos e
+                                JOIN bairros b ON e.id_bairro = b.id_bairro
+                                JOIN cidades c ON b.id_cidade = c.id_cidade
+                                JOIN estados s ON c.id_estado = s.id_estado
+                                WHERE e.id_usuario=%s""", (self.c_id,))
+        addr_opts = []
+        for er in end_rows:
+            txt = f"{er['id_endereco']} - {er['rua'] or 'Rua não informada'} - {er['bairro']}, {er['cidade']} ({er['estado'] or er['sigla']})"
+            addr_opts.append(txt)
+        # if no addresses, we allow free-text endereco input
+        if addr_opts:
+            addr_var = tk.StringVar(value=addr_opts[0])
+            cb_addr = ttk.Combobox(frame, values=addr_opts, textvariable=addr_var, state='readonly')
+            cb_addr.pack(fill='x', pady=4)
+        else:
+            ttk.Label(frame, text="Endereço (digite):").pack(anchor='w')
+            addr_entry = ttk.Entry(frame); addr_entry.pack(fill='x', pady=4)
+            addr_var = None
+        ttk.Label(frame, text="Descrição:").pack(anchor='w')
+        txt_desc = tk.Text(frame, height=6); txt_desc.pack(fill='x', pady=4)
+        # foto
+        foto_path_var = tk.StringVar()
+        fframe = ttk.Frame(frame); fframe.pack(fill='x', pady=4)
+        ttk.Entry(fframe, textvariable=foto_path_var).pack(side='left', fill='x', expand=True)
+        def escolher_foto(parent_window=None):
+            
+            p = filedialog.askopenfilename(parent=parent_window or self.root,
+                                           title="Selecione uma imagem",
+                                           filetypes=[("Imagens","*.png;*.jpg;*.jpeg;*.bmp;*.gif")])
+            if p:
+                foto_path_var.set(p)
+        ttk.Button(fframe, text="Escolher Foto", command=lambda: escolher_foto(parent_window=self.root)).pack(side='left', padx=6)
+        preview_label = ttk.Label(self.content_frame); preview_label.pack(pady=6)
+        def atualizar_preview():
+            p = foto_path_var.get()
+            if not p:
+                preview_label.config(image='', text='')
+                return
+            try:
+                im = Image.open(p); im.thumbnail((420,320))
+                tkimg = ImageTk.PhotoImage(im)
+                self._img_cache['preview_new'] = tkimg
+                preview_label.config(image=tkimg, text='')
+            except Exception:
+                preview_label.config(text=os.path.basename(p))
+        ttk.Button(self.content_frame, text="Preview Foto", command=atualizar_preview).pack(pady=4)
+        def enviar():
+            # recolher dados
+            tipo_str = cb_tipo.get()
+            id_tipo = int(tipo_str.split("-")[0].strip())
+            if addr_var:
+                endereco = addr_var.get()
+            else:
+                endereco = addr_entry.get().strip()
+            descricao = txt_desc.get("1.0", tk.END).strip()
+            if not endereco or not descricao:
+                messagebox.showwarning("Dados", "Preencha endereço e descrição.")
+                return
+            try:
+                sid = inserir_solicitacao(self.c_id, id_tipo, endereco, descricao)
+                p = foto_path_var.get()
+                if p:
+                    with open(p, "rb") as f:
+                        inserir_foto_solicitacao(sid, f.read(), os.path.basename(p))
+                messagebox.showinfo("OK", f"Solicitação criada (ID {sid}).")
+                self.ui_listar_minhas_solicitacoes()
+            except Exception as e:
+                traceback.print_exc()
+                messagebox.showerror("Erro", f"Erro ao criar solicitação: {e}")
+        ttk.Button(self.content_frame, text="Enviar Solicitação", command=enviar).pack(pady=8)
+
+    def ui_listar_minhas_solicitacoes(self):
+        for w in self.content_frame.winfo_children(): w.destroy()
+        ttk.Label(self.content_frame, text="Minhas Solicitações", font=("Arial", 12)).pack(anchor='w', pady=6)
+        rows = listar_solicitacoes_por_usuario(self.c_id)
+        if not rows:
+            ttk.Label(self.content_frame, text="Nenhuma solicitação.").pack()
+            return
+        canvas = tk.Canvas(self.content_frame)
+        frame_in = ttk.Frame(canvas)
+        vsb = ttk.Scrollbar(self.content_frame, orient='vertical', command=canvas.yview)
+        canvas.configure(yscrollcommand=vsb.set)
+        vsb.pack(side='right', fill='y')
+        canvas.pack(side='left', fill='both', expand=True)
+        canvas.create_window((0,0), window=frame_in, anchor='nw')
+        frame_in.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        for s in rows:
+            box = ttk.Frame(frame_in, style='Card.TFrame', padding=8); box.pack(fill='x', pady=6)
+            tipo_nome = buscar_servico_por_id(s['tipo'])['nome'] if buscar_servico_por_id(s['tipo']) else s['tipo']
+            ttk.Label(box, text=f"ID {s['id']} - {tipo_nome} - {s['status']}", font=("Arial", 10, 'bold')).pack(anchor='w')
+            ttk.Label(box, text=f"Endereço: {s['endereco']}").pack(anchor='w')
+            ttk.Label(box, text=f"Descrição: {s['descricao']}").pack(anchor='w')
+            ttk.Label(box, text=f"Abertura: {s['data_abertura']}  |  Conclusão: {s['data_conclusao']}").pack(anchor='w')
+            ttk.Label(box, text=f"Técnico: {s['id_tecnico'] or 'Não atribuído'}").pack(anchor='w')
+            # fotos
+            fotos = buscar_fotos_solicitacao(s['id'])
+            if fotos:
+                ph_frame = ttk.Frame(box); ph_frame.pack(anchor='w', pady=4)
+                for pf in fotos:
+                    fid, blob, fname = pf
+                    tkimg = load_image_for_tk_from_bytes(blob)
+                    if tkimg:
+                        self._img_cache[f"{s['id']}_{fid}"] = tkimg
+                        lbl = ttk.Label(ph_frame, image=tkimg); lbl.pack(side='left', padx=6)
+                    else:
+                        ttk.Label(ph_frame, text=f"[Foto: {fname}]").pack(side='left', padx=6)
+            # histórico e avaliação + editar/excluir
+            btns = ttk.Frame(box); btns.pack(anchor='e')
+            ttk.Button(btns, text="Histórico", command=lambda sid=s['id']: self.show_historico(sid)).pack(side='left', padx=4)
+
+            # EDITAR (aparece se NÃO estiver concluída)
+            if s['status'] != "Concluído":
+                ttk.Button(btns, text="Editar", command=lambda sid=s['id']: self.ui_editar_solicitacao(sid)).pack(side='left', padx=4)
+
+            # EXCLUIR (aparece apenas se Concluída E Avaliada)
+            if s['status'] == "Concluído":
+                if existe_avaliacao(s['id']):
+                    ttk.Button(btns, text="Excluir", command=lambda sid=s['id']: self._excluir_confirm(sid)).pack(side='left', padx=4)
+                else:
+                    ttk.Label(btns, text="Aguardando avaliação").pack(side='left', padx=6)
+
+            if s['status'] == "Concluído" and not existe_avaliacao(s['id']):
+                # avisar usuário que avalie
+                ttk.Button(btns, text="Avaliar", command=lambda sid=s['id']: self.ui_avaliar_solicitacao(sid)).pack(side='left', padx=4)
+
+    def _excluir_confirm(self, sid):
+        if not messagebox.askyesno("Confirmar exclusão", "Confirma excluir essa solicitação (irreversível)?"):
+            return
+        try:
+            # checar regras de segurança
+            row = fetchone("SELECT status FROM solicitacoes WHERE id_solicitacao=%s", (sid,))
+            if not row:
+                messagebox.showerror("Erro", "Solicitação não encontrada.")
+                return
+            if row['status'] != "Concluído":
+                messagebox.showwarning("Regra", "Apenas solicitações concluídas podem ser excluídas.")
+                return
+            if not existe_avaliacao(sid):
+                messagebox.showwarning("Regra", "Apenas solicitações com avaliação podem ser excluídas.")
+                return
+            excluir_solicitacao_db(sid)
+            messagebox.showinfo("OK", "Solicitação excluída.")
+            self.ui_listar_minhas_solicitacoes()
+        except Exception as e:
+            traceback.print_exc()
+            messagebox.showerror("Erro", str(e))
+
+    def show_historico(self, sid):
+        hist = listar_historico_solicitacao(sid)
+        txt = "\n".join([f"{h['data_alteracao']} : {h['status_antigo']} -> {h['status_novo']}" for h in hist]) or "Sem histórico."
+        messagebox.showinfo("Histórico", txt)
+
+    def ui_avaliar_solicitacao(self, id_solicitacao):
+        w = tk.Toplevel(self.root); w.title("Avaliar Solicitação"); w.geometry("380x260")
+        ttk.Label(w, text="Avaliação (1-5):").pack(anchor='w', padx=10, pady=(10,0))
+        nota_var = tk.IntVar(value=5)
+        ttk.Spinbox(w, from_=1, to=5, textvariable=nota_var).pack(padx=10)
+        ttk.Label(w, text="Comentário:").pack(anchor='w', padx=10, pady=(8,0))
+        txt = tk.Text(w, height=6); txt.pack(fill='both', padx=10, pady=6)
+        def enviar():
+            nota = nota_var.get()
+            comentario = txt.get("1.0", tk.END).strip()
+            inserir_avaliacao(id_solicitacao, nota, comentario)
+            messagebox.showinfo("OK", "Avaliação enviada.")
+            w.destroy()
+            self.ui_listar_minhas_solicitacoes()
+        ttk.Button(w, text="Enviar Avaliação", command=enviar).pack(pady=6)
+
+    # ---------- EDIÇÃO 
+    def ui_editar_solicitacao(self, id_solicitacao):
+        # carregar dados atuais
+        s = fetchone("""SELECT id_solicitacao AS id, id_tipo AS tipo, endereco, descricao, status
+                       FROM solicitacoes WHERE id_solicitacao=%s""", (id_solicitacao,))
+        if not s:
+            messagebox.showerror("Erro", "Solicitação não encontrada.")
+            return
+        if s['status'] == "Concluído":
+            messagebox.showwarning("Regra", "Não é permitido editar solicitações concluídas.")
+            return
+
+        w = tk.Toplevel(self.root); w.title(f"Editar Solicitação {id_solicitacao}"); w.geometry("640x520")
+        ttk.Label(w, text=f"Editar Solicitação ID {id_solicitacao}", font=("Arial", 12)).pack(anchor='w', pady=6)
+        frame = ttk.Frame(w); frame.pack(fill='both', expand=True, padx=8)
+
+        # tipos
+        tipos = listar_servicos_tipo()
+        tipo_map = {str(t['id_tipo']): t['nome'] for t in tipos}
+        tipo_vals = [f"{k} - {tipo_map[k]}" for k in tipo_map]
+        tipo_var = tk.StringVar(value=f"{s['tipo']} - {buscar_servico_por_id(s['tipo'])['nome']}" if tipo_vals else "")
+        cb_tipo = ttk.Combobox(frame, values=tipo_vals, textvariable=tipo_var, state='readonly'); cb_tipo.pack(fill='x', pady=4)
+
+        # endereço: permitir escolher entre endereços do usuário ou texto livre
+        ttk.Label(frame, text="Endereço onde ocorrerá o serviço:").pack(anchor='w')
+        end_rows = fetchall("""SELECT e.id_endereco, e.rua, e.numero, e.complemento, b.nome AS bairro, c.nome AS cidade, s.sigla AS estado
+                                FROM enderecos e
+                                JOIN bairros b ON e.id_bairro = b.id_bairro
+                                JOIN cidades c ON b.id_cidade = c.id_cidade
+                                JOIN estados s ON c.id_estado = s.id_estado
+                                WHERE e.id_usuario=%s""", (self.c_id,))
+        addr_opts = []
+        for er in end_rows:
+            txt = f"{er['id_endereco']} - {er['rua'] or 'Rua não informada'} - {er['bairro']}, {er['cidade']} ({er['estado'] or er['sigla']})"
+            addr_opts.append(txt)
+        addr_var = None
+        if addr_opts:
+            addr_var = tk.StringVar(value=addr_opts[0])
+            cb_addr = ttk.Combobox(frame, values=addr_opts, textvariable=addr_var, state='readonly')
+            cb_addr.pack(fill='x', pady=4)
+            # set to nearest matching if available
+            # if stored endereco text matches pattern "id - ..." ignore; otherwise keep as text below
+        else:
+            addr_entry = ttk.Entry(frame); addr_entry.pack(fill='x', pady=4)
+
+        # descrição
+        ttk.Label(frame, text="Descrição:").pack(anchor='w')
+        txt_desc = tk.Text(frame, height=6); txt_desc.pack(fill='x', pady=4)
+        txt_desc.delete("1.0", tk.END); txt_desc.insert(tk.END, s['descricao'] or "")
+
+        # foto atual 
+        fotos = buscar_fotos_solicitacao(id_solicitacao)
+        ttk.Label(frame, text="Fotos atuais:").pack(anchor='w')
+        ph_frame = ttk.Frame(frame); ph_frame.pack(anchor='w', pady=4)
+        for pf in fotos:
+            fid, blob, fname = pf
+            tkimg = load_image_for_tk_from_bytes(blob, maxsize=(160,120))
+            if tkimg:
+                self._img_cache[f"edit_{id_solicitacao}_{fid}"] = tkimg
+                lbl = ttk.Label(ph_frame, image=tkimg); lbl.pack(side='left', padx=6)
+            else:
+                ttk.Label(ph_frame, text=f"[{fname}]").pack(side='left', padx=6)
+
+        # permitir escolher nova foto para substituir/adicionar
+        foto_path_var = tk.StringVar()
+        fframe = ttk.Frame(frame); fframe.pack(fill='x', pady=4)
+        ttk.Entry(fframe, textvariable=foto_path_var).pack(side='left', fill='x', expand=True)
+        def escolher_foto_edit():
+            p = filedialog.askopenfilename(parent=w,
+                                           title="Selecione uma imagem",
+                                           filetypes=[("Imagens","*.png;*.jpg;*.jpeg;*.bmp;*.gif")])
+            if p:
+                foto_path_var.set(p)
+        ttk.Button(fframe, text="Escolher Nova Foto", command=escolher_foto_edit).pack(side='left', padx=6)
+        preview_label = ttk.Label(frame); preview_label.pack(pady=6)
+        def atualizar_preview_edit():
+            p = foto_path_var.get()
+            if not p:
+                preview_label.config(image='', text='')
+                return
+            try:
+                im = Image.open(p); im.thumbnail((420,320))
+                tkimg = ImageTk.PhotoImage(im)
+                self._img_cache['preview_edit'] = tkimg
+                preview_label.config(image=tkimg, text='')
+            except Exception:
+                preview_label.config(text=os.path.basename(p))
+        ttk.Button(frame, text="Preview Nova Foto", command=atualizar_preview_edit).pack(pady=4)
+
+        # salvar alterações
+        def salvar_edicao():
+            try:
+                tipo_str = cb_tipo.get()
+                id_tipo = int(tipo_str.split("-")[0].strip())
+                if addr_var:
+                    endereco = addr_var.get()
+                else:
+                    endereco = addr_entry.get().strip()
+                descricao = txt_desc.get("1.0", tk.END).strip()
+                if not endereco or not descricao:
+                    messagebox.showwarning("Dados", "Preencha endereço e descrição.")
+                    return
+                atualizar_solicitacao_db(id_solicitacao, id_tipo, endereco, descricao)
+                p = foto_path_var.get()
+                if p:
+                    with open(p, "rb") as f:
+                        inserir_foto_solicitacao(id_solicitacao, f.read(), os.path.basename(p))
+                messagebox.showinfo("OK", "Solicitação atualizada.")
+                w.destroy()
+                self.ui_listar_minhas_solicitacoes()
+            except Exception as e:
+                traceback.print_exc()
+                messagebox.showerror("Erro", str(e))
+
+        ttk.Button(frame, text="Salvar Alterações", command=salvar_edicao).pack(pady=8)
+
+    # ---------- Login Técnico / painel ----------
+    def login_tecnico_window(self):
+        w = tk.Toplevel(self.root); w.title("Login - Técnico"); w.geometry("380x220")
+        ttk.Label(w, text="Código (ex: TEC001):").pack(anchor='w', padx=8, pady=(12,0))
+        code_e = ttk.Entry(w); code_e.pack(fill='x', padx=8)
+        ttk.Label(w, text="Senha:").pack(anchor='w', padx=8, pady=(8,0))
+        senha_e = ttk.Entry(w, show='*'); senha_e.pack(fill='x', padx=8)
+        msg = ttk.Label(w, text="", foreground="red"); msg.pack(pady=6)
+        def do_login():
+            codigo = code_e.get().strip()
+            senha = senha_e.get().strip()
+            if not codigo or not senha:
+                msg.config(text="Preencha.")
+                return
+            tech = buscar_tecnico_por_codigo(codigo)
+            if not tech:
+                msg.config(text="Técnico não encontrado.")
+                return
+            if tech['senha'] != senha:
+                msg.config(text="Senha incorreta.")
+                return
+            # ok
+            inserir_log_acesso(id_usuario=None, id_tecnico=tech['id_tecnico'], ip="local")
+            w.destroy()
+            self.t_id = tech['id_tecnico']
+            self.t_nome = tech['nome']
+            self.t_esp = tech['especialidade']
+            self.show_tecnico_panel()
+        ttk.Button(w, text="Entrar", command=do_login).pack(pady=8)
+        ttk.Button(w, text="Fechar", command=w.destroy).pack()
+
+    def show_tecnico_panel(self):
+        self.clear_main_content()
+        ttk.Label(self.frame_main, text=f"Painel Técnico — {self.t_nome} (ID {self.t_id}) - Especialidade: {self.t_esp}", font=("Arial", 13)).pack(anchor='w', pady=6)
+        toolbar = ttk.Frame(self.frame_main); toolbar.pack(fill='x')
+        ttk.Button(toolbar, text="Solicitações Não Atribuídas (todas)", command=self.tecn_listar_nao_atribuidas).pack(side='left', padx=6)
+        ttk.Button(toolbar, text="Minhas Solicitações", command=self.tecn_listar_minhas).pack(side='left', padx=6)
+        ttk.Button(toolbar, text="Voltar", command=self.clear_main_content).pack(side='right', padx=6)
+        self.tech_frame = ttk.Frame(self.frame_main); self.tech_frame.pack(fill='both', expand=True, pady=6)
+        self.tecn_listar_nao_atribuidas()
+
+    def tecn_listar_nao_atribuidas(self):
+        for w in self.tech_frame.winfo_children(): w.destroy()
+        ttk.Label(self.tech_frame, text="Solicitações Não Atribuídas", font=("Arial", 12)).pack(anchor='w', pady=6)
+        rows = listar_solicitacoes_nao_atribuidas()
+        if not rows:
+            ttk.Label(self.tech_frame, text="Nenhuma solicitação não atribuída.").pack()
+            return
+        canvas = tk.Canvas(self.tech_frame); frame_in = ttk.Frame(canvas)
+        vsb = ttk.Scrollbar(self.tech_frame, orient='vertical', command=canvas.yview)
+        canvas.configure(yscrollcommand=vsb.set)
+        vsb.pack(side='right', fill='y'); canvas.pack(side='left', fill='both', expand=True)
+        canvas.create_window((0,0), window=frame_in, anchor='nw')
+        frame_in.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        for s in rows:
+            # filter: show only those matching this technician's specialty OR show all (as required)
+            # We'll show all but highlight those matching.
+            box = ttk.Frame(frame_in, style='Card.TFrame', padding=8); box.pack(fill='x', pady=6)
+            tipo_nome = buscar_servico_por_id(s['tipo'])['nome'] if buscar_servico_por_id(s['tipo']) else s['tipo']
+            ttk.Label(box, text=f"ID {s['id']} — {tipo_nome} — {s['data_abertura']}", font=("Arial", 10, 'bold')).pack(anchor='w')
+            ttk.Label(box, text=f"Endereço: {s['endereco']}").pack(anchor='w')
+            ttk.Label(box, text=f"Descrição: {s['descricao']}").pack(anchor='w')
+            # botão assumir — mas permitimos assumir somente se a especialidade casar com a do técnico
+            def can_assume():
+                # retorna True se a especialidade do técnico contém o nome do tipo do serviço
+                nome_serv = (tipo_nome or "").strip().lower()
+                esp = (self.t_esp or "").strip().lower()
+                return esp == nome_serv or (nome_serv in esp) or (esp in nome_serv)
+            if can_assume():
+                ttk.Button(box, text="Assumir (Especialidade OK)", command=lambda sid=s['id']: self._assumir_solicitacao(sid)).pack(pady=6)
+            else:
+                ttk.Button(box, text="Assumir (fora de especialidade)", command=lambda sid=s['id']: self._assumir_solicitacao_forcado(sid)).pack(pady=6)
+
+    def _assumir_solicitacao(self, sid):
+        ok = atribuir_solicitacao(sid, self.t_id)
+        if ok:
+            messagebox.showinfo("OK", "Solicitação atribuída a você.")
+            self.tecn_listar_nao_atribuidas()
+        else:
+            messagebox.showwarning("Aviso", "Não foi possível atribuir (talvez já atribuída).")
+
+    def _assumir_solicitacao_forcado(self, sid):
+        # confirmação extra
+        if not messagebox.askyesno("Confirmar", "Assumir mesmo sendo fora da sua especialidade?"):
+            return
+        ok = atribuir_solicitacao(sid, self.t_id)
+        if ok:
+            messagebox.showinfo("OK", "Solicitação atribuída a você.")
+            self.tecn_listar_nao_atribuidas()
+        else:
+            messagebox.showwarning("Aviso", "Não foi possível atribuir (talvez já atribuída).")
+
+    def tecn_listar_minhas(self):
+        for w in self.tech_frame.winfo_children(): w.destroy()
+        ttk.Label(self.tech_frame, text="Minhas Solicitações", font=("Arial", 12)).pack(anchor='w', pady=6)
+        rows = listar_solicitacoes_por_tecnico(self.t_id)
+        if not rows:
+            ttk.Label(self.tech_frame, text="Nenhuma solicitação atribuída.").pack()
+            return
+        canvas = tk.Canvas(self.tech_frame); frame_in = ttk.Frame(canvas)
+        vsb = ttk.Scrollbar(self.tech_frame, orient='vertical', command=canvas.yview)
+        canvas.configure(yscrollcommand=vsb.set)
+        vsb.pack(side='right', fill='y'); canvas.pack(side='left', fill='both', expand=True)
+        canvas.create_window((0,0), window=frame_in, anchor='nw')
+        frame_in.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        for s in rows:
+            box = ttk.Frame(frame_in, style='Card.TFrame', padding=8); box.pack(fill='x', pady=6)
+            tipo_nome = buscar_servico_por_id(s['tipo'])['nome'] if buscar_servico_por_id(s['tipo']) else s['tipo']
+            ttk.Label(box, text=f"ID {s['id']} — {tipo_nome} — Status: {s['status']}", font=("Arial", 10, 'bold')).pack(anchor='w')
+            ttk.Label(box, text=f"Endereço: {s['endereco']}").pack(anchor='w')
+            ttk.Label(box, text=f"Descrição: {s['descricao']}").pack(anchor='w')
+            ttk.Label(box, text=f"Abertura: {s['data_abertura']}").pack(anchor='w')
+            # ações
+            btns = ttk.Frame(box); btns.pack(pady=6)
+            ttk.Button(btns, text="Marcar Em Andamento", command=lambda sid=s['id']: self._marcar_status(sid, "Em Andamento")).pack(side='left', padx=6)
+            ttk.Button(btns, text="Marcar Concluído", command=lambda sid=s['id']: self._marcar_status(sid, "Concluído")).pack(side='left', padx=6)
+            ttk.Button(btns, text="Ver Histórico", command=lambda sid=s['id']: self.show_historico(sid)).pack(side='left', padx=6)
+
+    def _marcar_status(self, sid, novo_status):
+        try:
+            atualizar_status_solicitacao(sid, novo_status)
+            messagebox.showinfo("OK", f"Status atualizado para '{novo_status}'.")
+            # refresh
+            self.tecn_listar_minhas()
+        except Exception as e:
+            traceback.print_exc()
+            messagebox.showerror("Erro", str(e))
+
+# ---------------------------
+# roda app
+# ---------------------------
+def main():
+    root = tk.Tk()
+    app = SistemaApp(root)
+    root.mainloop()
+
+if __name__ == "__main__":
+    main()
