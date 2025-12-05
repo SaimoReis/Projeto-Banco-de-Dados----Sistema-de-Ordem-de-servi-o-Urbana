@@ -1,3 +1,8 @@
+#observações: fizemos a utilização de IA(chat GPT), em duas partes do código, a primeira foi utilizada para apoio na inserção do dado binário. 
+A segunda foi na criação da procedure para exclusão da ordem de serviço caso o cidadão queira excluir a OS após finalizada e avaliada.
+
+
+
 import os
 import io
 import traceback
